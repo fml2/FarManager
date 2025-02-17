@@ -41,6 +41,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "platform.chrono.hpp"
 
 // Common:
+#include "common/compiler.hpp"
 #include "common/noncopyable.hpp"
 
 // External:
@@ -51,20 +52,20 @@ using time_component = unsigned int;
 
 constexpr inline struct
 {
-	operator uint8_t() const { return static_cast<uint8_t>(time_none); }
-	operator uint16_t() const { return static_cast<uint16_t>(time_none); }
-	operator uint32_t() const { return time_none; }
+	constexpr operator uint8_t() const { return static_cast<uint8_t>(time_none); }
+	constexpr operator uint16_t() const { return static_cast<uint16_t>(time_none); }
+	constexpr operator uint32_t() const { return time_none; }
+
+WARNING_PUSH()
+WARNING_DISABLE_CLANG("-Wunused-template")
+	constexpr bool operator==(std::integral auto const Component) const { return Component == static_cast<decltype(Component)>(time_none); }
+WARNING_POP()
 
 private:
 	enum { time_none = std::numeric_limits<time_component>::max() };
 
 }
 time_none;
-
-constexpr bool is_time_none(auto const Component)
-{
-	return Component == static_cast<decltype(Component)>(time_none);
-}
 
 os::chrono::time parse_time(string_view Date, string_view Time, int DateFormat);
 os::chrono::time_point ParseTimePoint(string_view Date, string_view Time, int DateFormat);

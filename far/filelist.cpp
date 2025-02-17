@@ -1937,8 +1937,10 @@ bool FileList::ProcessKey(const Manager::Key& Key)
 						{
 							if (EnableExternal)
 							{
-								ProcessExternal(Global->Opt->strExternalEditor, strFileName, strShortFileName, PluginMode, TemporaryDirectory);
-								UploadFile = file_state::get(strFileName) != SavedState;
+								UploadFile =
+									ProcessExternal(Global->Opt->strExternalEditor, strFileName, strShortFileName, PluginMode, TemporaryDirectory) &&
+									file_state::get(strFileName) != SavedState;
+
 								Modaling = PluginMode; // External editor from plugin panel is Modal!
 							}
 							else if (PluginMode)
@@ -4871,7 +4873,7 @@ void FileList::SelectSortMode()
 		}
 	}
 
-	const auto& SetCheckAndSelect = [&](size_t const Index)
+	const auto SetCheckAndSelect = [&](size_t const Index)
 	{
 		auto& MenuItem = SortMenu[Index];
 		MenuItem.SetCustomCheck(order_indicator(m_ReverseSortOrder? sort_order::descend : sort_order::ascend));
@@ -5178,7 +5180,11 @@ bool FileList::ApplyCommand()
 				break;
 
 			bool PreserveLFN = false;
-			if (string strConvertedCommand = strCommand; SubstFileName(strConvertedCommand, { i.FileName, i.AlternateFileName() }, &PreserveLFN) && !strConvertedCommand.empty())
+			string strConvertedCommand = strCommand;
+			if (!SubstFileName(strConvertedCommand, { i.FileName, i.AlternateFileName() }, &PreserveLFN))
+				break;
+
+			if (!strConvertedCommand.empty())
 			{
 				SCOPED_ACTION(PreserveLongName)(i.FileName, PreserveLFN);
 
@@ -8058,28 +8064,24 @@ void FileList::ShowFileList(bool Fast)
 
 FarColor FileList::GetShowColor(int Position, bool FileColor) const
 {
-	auto ColorAttr = colors::PaletteColorToFarColor(COL_PANELTEXT);
-
 	if (static_cast<size_t>(Position) >= data_size())
-		return ColorAttr;
+		return colors::PaletteColorToFarColor(COL_PANELTEXT);
 
 	const auto DataLock = lock_data();
 	const auto& m_ListData = *DataLock;
 
-	int Pos = highlight::color::normal;
+	auto ColorIndex = highlight::color::normal;
 
 	if (m_CurFile == Position && IsFocused() && !m_ListData.empty())
 	{
-		Pos=m_ListData[Position].Selected? highlight::color::selected_current : highlight::color::normal_current;
+		ColorIndex = m_ListData[Position].Selected? highlight::color::selected_current : highlight::color::normal_current;
 	}
 	else if (m_ListData[Position].Selected)
 	{
-		Pos = highlight::color::selected;
+		ColorIndex = highlight::color::selected;
 	}
 
-	const auto HighlightingEnabled = Global->Opt->Highlight && (m_PanelMode != panel_mode::PLUGIN_PANEL || !(m_CachedOpenPanelInfo.Flags & OPIF_DISABLEHIGHLIGHTING));
-
-	if (HighlightingEnabled)
+	if (Global->Opt->Highlight && (m_PanelMode != panel_mode::PLUGIN_PANEL || !(m_CachedOpenPanelInfo.Flags & OPIF_DISABLEHIGHLIGHTING)))
 	{
 		if (!m_ListData[Position].Colors)
 		{
@@ -8087,25 +8089,14 @@ FarColor FileList::GetShowColor(int Position, bool FileColor) const
 			m_ListData[Position].Colors = Global->CtrlObject->HiFiles->GetHiColor(m_ListData[Position], this, UseAttrHighlighting);
 		}
 
-		auto Colors = m_ListData[Position].Colors->Color[Pos];
-		highlight::configuration::ApplyFinalColor(Colors, Pos);
-		ColorAttr = FileColor ? Colors.FileColor : Colors.MarkColor;
+		auto Colors = m_ListData[Position].Colors->Color;
+		highlight::configuration::ApplyFinalColor(Colors, ColorIndex);
+		return FileColor? Colors[ColorIndex].FileColor : Colors[ColorIndex].MarkColor;
 	}
 
-	if (!HighlightingEnabled || (!ColorAttr.ForegroundColor && !ColorAttr.BackgroundColor)) // black on black, default
-	{
-		static const PaletteColors PalColor[]
-		{
-			COL_PANELTEXT,
-			COL_PANELSELECTEDTEXT,
-			COL_PANELCURSOR,
-			COL_PANELSELECTEDCURSOR
-		};
-
-		ColorAttr=colors::PaletteColorToFarColor(PalColor[Pos]);
-	}
-
-	return ColorAttr;
+	FarColor Result{};
+	highlight::configuration::InheritPaletteColor(Result, ColorIndex);
+	return Result;
 }
 
 void FileList::SetShowColor(int Position, bool FileColor) const
@@ -8294,12 +8285,15 @@ bool FileList::ConvertName(const string_view SrcName, string& strDest, const siz
 		auto SpacesBetween =
 			VisualNameLength + AlignedVisualExtensionLength <= MaxLength?
 				MaxLength - VisualNameLength - AlignedVisualExtensionLength:
-				1;
+				0;
 
-		if (!SpacesBetween && VisualNameLength + VisualExtensionLength < MaxLength)
+		if (!SpacesBetween && VisualNameLength + VisualExtensionLength <= MaxLength)
 			SpacesBetween = MaxLength - VisualNameLength - VisualExtensionLength;
 
-		const auto SpacesAfter = MaxLength - VisualNameLength - SpacesBetween - VisualExtensionLength;
+		const auto SpacesAfter =
+			VisualNameLength + SpacesBetween + VisualExtensionLength <= MaxLength?
+			MaxLength - VisualNameLength - SpacesBetween - VisualExtensionLength :
+			0;
 
 		strDest += Name;
 		strDest.append(SpacesBetween, L' ');

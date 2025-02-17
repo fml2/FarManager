@@ -410,6 +410,8 @@ static void InitProfile(string &strProfilePath, string &strLocalProfilePath)
 			Global->Opt->ReadOnlyConfig = true;
 		}
 	}
+
+	set_report_location(Global->Opt->LocalProfilePath);
 }
 
 static bool is_arg(string_view const Str)
@@ -482,15 +484,6 @@ static std::optional<int> ProcessServiceModes(std::span<const wchar_t* const> co
 	}
 
 	return {};
-}
-
-[[noreturn]]
-static void handle_exception(function_ref<bool()> const Handler)
-{
-	if (Handler())
-		os::process::terminate_by_user();
-
-	throw;
 }
 
 #ifdef _M_IX86
@@ -812,8 +805,6 @@ static int mainImpl(std::span<const wchar_t* const> const Args)
 	if (FarColor InitAttributes; console.GetTextAttributes(InitAttributes))
 		colors::store_default_color(InitAttributes);
 
-	SCOPE_EXIT{ console.SetTextAttributes(colors::default_color()); };
-
 	SCOPED_ACTION(global);
 
 	std::optional<elevation::suppress> NoElevationDuringBoot(std::in_place);
@@ -944,13 +935,13 @@ static int mainImpl(std::span<const wchar_t* const> const Args)
 	{
 		return MainProcess(strEditName, strViewName, DestNames[0], DestNames[1], StartLine, StartChar);
 	},
-	[&](source_location const& Location) -> int
+	[](source_location const& Location) -> int
 	{
-		handle_exception([&]{ return handle_unknown_exception({}, Location); });
+		handle_unknown_exception(Location);
 	},
-	[&](std::exception const& e, source_location const& Location) -> int
+	[](std::exception const& e, source_location const& Location) -> int
 	{
-		handle_exception([&]{ return handle_std_exception(e, {}, Location); });
+		handle_std_exception(e, Location);
 	});
 }
 
@@ -972,19 +963,11 @@ static void configure_exception_handling(std::span<wchar_t const* const> const A
 		if (equal_icase(i + 1, L"service"sv))
 		{
 			os::debug::crt_report_to_stderr();
+			report_to_stderr();
+			suppress_console_confirmations();
 			continue;
 		}
 	}
-}
-
-[[noreturn]]
-static void handle_exception_final(function_ref<bool()> const Handler)
-{
-	if (Handler())
-		os::process::terminate_by_user();
-
-	restore_system_exception_handler();
-	throw;
 }
 
 #ifdef _DEBUG
@@ -1037,13 +1020,15 @@ static int wmain_seh()
 			return EXIT_FAILURE;
 		}
 	},
-	[&](source_location const& Location) -> int
+	[](source_location const& Location) -> int
 	{
-		handle_exception_final([&]{ return handle_unknown_exception({}, Location); });
+		SCOPE_FAIL{ restore_system_exception_handler(); };
+		handle_unknown_exception(Location);
 	},
-	[&](std::exception const& e, source_location const& Location) -> int
+	[](std::exception const& e, source_location const& Location) -> int
 	{
-		handle_exception_final([&]{ return handle_std_exception(e, {}, Location); });
+		SCOPE_FAIL{ restore_system_exception_handler(); };
+		handle_std_exception(e, Location);
 	});
 }
 
@@ -1055,9 +1040,9 @@ int main()
 		os::debug::set_thread_name(L"Main Thread");
 		return wmain_seh();
 	},
-	[](DWORD const ExceptionCode) -> int
+	[](DWORD const) -> int
 	{
-		os::process::terminate_by_user(ExceptionCode);
+		std::unreachable();
 	});
 }
 

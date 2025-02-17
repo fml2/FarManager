@@ -92,11 +92,11 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "color_picker.hpp"
 #include "log.hpp"
 #include "filestr.hpp"
+#include "colormix.hpp"
 
 // Platform:
 #include "platform.hpp"
 #include "platform.fs.hpp"
-#include "platform.process.hpp"
 
 // Common:
 #include "common/enum_tokens.hpp"
@@ -160,37 +160,6 @@ namespace cfunctions
 		qsort_param = user_param;
 		return std::qsort(base, nel, width, qsort_comparer_wrapper);
 	}
-}
-
-// BUGBUG duplicate
-template<typename callable_type>
-auto cpp_try(callable_type const& Callable, source_location const& Location = source_location::current())
-{
-	using return_type = typename function_traits<callable_type>::result_type;
-
-	const auto& handle_exception = [&] /*[[noreturn]]*/ (const auto& Handler, auto&&... Args)
-	{
-		if (Handler(FWD(Args)..., nullptr, Location))
-			if (use_terminate_handler())
-				os::process::terminate_by_user(EXIT_FAILURE);
-
-		throw;
-	};
-
-	return cpp_try(
-		Callable,
-		[&](source_location const&) -> return_type
-		{
-			handle_exception(handle_unknown_exception);
-			std::unreachable();
-		},
-		[&](std::exception const& e, source_location const&) -> return_type
-		{
-			handle_exception(handle_std_exception, e);
-			std::unreachable();
-		},
-		Location
-	);
 }
 
 class pluginapi_sort_accessor
@@ -523,9 +492,9 @@ intptr_t WINAPI apiAdvControl(const UUID* PluginId, ADVANCED_CONTROL_COMMANDS Co
 			Return - TRUE если OK или FALSE если индекс неверен.
 		*/
 		case ACTL_GETCOLOR:
-			if (static_cast<size_t>(Param1) < Global->Opt->Palette.size())
+			if (static_cast<size_t>(Param1) < COL_LASTPALETTECOLOR)
 			{
-				*static_cast<FarColor*>(Param2) = Global->Opt->Palette[static_cast<size_t>(Param1)];
+				*static_cast<FarColor*>(Param2) = colors::PaletteColorToFarColor(static_cast<PaletteColors>(Param1));
 				return TRUE;
 			}
 			return FALSE;
