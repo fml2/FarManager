@@ -210,7 +210,7 @@ void SQLiteDb::SQLiteStmt::stmt_deleter::operator()(sqlite::sqlite3_stmt* Object
 	});
 }
 
-SQLiteDb::SQLiteStmt& SQLiteDb::SQLiteStmt::Reset()
+SQLiteDb::SQLiteStmt const& SQLiteDb::SQLiteStmt::Reset() const
 {
 	invoke(db(), [&]{ return sqlite::sqlite3_clear_bindings(m_Stmt.get()) == SQLITE_OK; }, sql());
 
@@ -259,29 +259,25 @@ void SQLiteDb::SQLiteStmt::Execute() const
 	sql());
 }
 
-SQLiteDb::SQLiteStmt& SQLiteDb::SQLiteStmt::BindImpl(int Value)
+void SQLiteDb::SQLiteStmt::BindImpl(int const Value) const
 {
 	invoke(db(), [&]
 	{
 		return sqlite::sqlite3_bind_int(m_Stmt.get(), ++m_Param, Value) == SQLITE_OK;
 	},
 	sql());
-
-	return *this;
 }
 
-SQLiteDb::SQLiteStmt& SQLiteDb::SQLiteStmt::BindImpl(long long Value)
+void SQLiteDb::SQLiteStmt::BindImpl(long long const Value) const
 {
 	invoke(db(), [&]
 	{
 		return sqlite::sqlite3_bind_int64(m_Stmt.get(), ++m_Param, Value) == SQLITE_OK;
 	},
 	sql());
-
-	return *this;
 }
 
-SQLiteDb::SQLiteStmt& SQLiteDb::SQLiteStmt::BindImpl(const string_view Value)
+void SQLiteDb::SQLiteStmt::BindImpl(string_view const Value) const
 {
 	// https://www.sqlite.org/c3ref/bind_blob.html
 	// If the third parameter to sqlite3_bind_text() or sqlite3_bind_text16() or sqlite3_bind_blob() is a NULL pointer
@@ -295,19 +291,15 @@ SQLiteDb::SQLiteStmt& SQLiteDb::SQLiteStmt::BindImpl(const string_view Value)
 		return sqlite::sqlite3_bind_text(m_Stmt.get(), ++m_Param, NullToEmpty(ValueUtf8.data()), static_cast<int>(ValueUtf8.size()), sqlite::transient_destructor) == SQLITE_OK;
 	},
 	sql());
-
-	return *this;
 }
 
-SQLiteDb::SQLiteStmt& SQLiteDb::SQLiteStmt::BindImpl(bytes_view const Value)
+void SQLiteDb::SQLiteStmt::BindImpl(bytes_view const Value) const
 {
 	invoke(db(), [&]
 	{
 		return sqlite::sqlite3_bind_blob(m_Stmt.get(), ++m_Param, Value.data(), static_cast<int>(Value.size()), sqlite::transient_destructor) == SQLITE_OK;
 	},
 	sql());
-
-	return *this;
 }
 
 sqlite::sqlite3* SQLiteDb::SQLiteStmt::db() const
@@ -595,7 +587,11 @@ void SQLiteDb::SetWALJournalingMode() const
 
 void SQLiteDb::EnableForeignKeysConstraints() const
 {
-	Exec("PRAGMA foreign_keys = ON;"sv);
+	invoke(m_Db.get(), [&]
+	{
+		int NewValue;
+		return sqlite::sqlite3_db_config(m_Db.get(), SQLITE_DBCONFIG_ENABLE_FKEY, 1, &NewValue) == SQLITE_OK && NewValue;
+	});
 }
 
 template<typename char_type>
@@ -610,9 +606,10 @@ struct collation_context
 {
 	static inline struct cache
 	{
-		string Buffer1, Buffer2;
+		std::string Utf8String;
+		string WideString;
 	}
-	CollationCache;
+	CollationCache[2];
 
 	comparer* Comparer;
 	int Encoding;
@@ -625,11 +622,13 @@ static void context_deleter(void* Param)
 
 static int combined_comparer(void* const Param, int const Size1, const void* const Data1, int const Size2, const void* const Data2)
 {
-	const auto
-		RawView1 = view<char>(Data1, Size1),
-		RawView2 = view<char>(Data2, Size2);
+	std::string_view const RawView[]
+	{
+		view<char>(Data1, Size1),
+		view<char>(Data2, Size2),
+	};
 
-	if (RawView1 == RawView2)
+	if (RawView[0] == RawView[1])
 		return 0;
 
 	const auto Context = static_cast<collation_context*>(Param);
@@ -642,12 +641,24 @@ static int combined_comparer(void* const Param, int const Size1, const void* con
 		));
 	}
 
-	encoding::utf8::get_chars(RawView1, Context->CollationCache.Buffer1);
-	encoding::utf8::get_chars(RawView2, Context->CollationCache.Buffer2);
+	const auto convert = [&](size_t const Index)
+	{
+		const auto& In = RawView[Index];
+		auto& Out = Context->CollationCache[Index];
+
+		if (In == Out.Utf8String)
+			return;
+
+		encoding::utf8::get_chars(In, Out.WideString);
+		Out.Utf8String = In;
+	};
+
+	convert(0);
+	convert(1);
 
 	return string_sort::ordering_as_int(Context->Comparer(
-		Context->CollationCache.Buffer1,
-		Context->CollationCache.Buffer2
+		Context->CollationCache[0].WideString,
+		Context->CollationCache[1].WideString
 	));
 }
 

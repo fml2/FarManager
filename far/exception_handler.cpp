@@ -128,7 +128,25 @@ static bool HandleCppExceptions = true;
 static bool HandleSehExceptions = true;
 static bool ForceStderrExceptionUI = false;
 
-static std::atomic_bool UseTerminateHandler = false;
+static bool s_ReportToStdErr = false;
+
+// On CI we can't access the filesystem, so just drop everything to stderr.
+void report_to_stderr()
+{
+	s_ReportToStdErr = true;
+}
+
+static wchar_t s_ReportLocation[MAX_PATH];
+
+// We can crash in the cleanup phase when profile paths are already destroyed.
+// Keeping the location in a static buffer increases the chance of using the proper path.
+void set_report_location(string_view Directory)
+{
+	if (Directory.size() < std::size(s_ReportLocation))
+	{
+		std::copy(ALL_CONST_RANGE(Directory), s_ReportLocation);
+	}
+}
 
 void disable_exception_handling()
 {
@@ -222,7 +240,12 @@ static string get_report_location()
 {
 	const auto SubDir = unique_name();
 
-	if (const auto CrashLogs = path::join(Global? Global->Opt->LocalProfilePath : L"."sv, L"CrashLogs"); os::fs::is_directory(CrashLogs) || os::fs::create_directory(CrashLogs))
+	string_view ReportLocationBase =
+		Global? Global->Opt->LocalProfilePath :
+		*s_ReportLocation? s_ReportLocation :
+		L"."sv;
+
+	if (const auto CrashLogs = path::join(ReportLocationBase, L"CrashLogs"); os::fs::is_directory(CrashLogs) || os::fs::create_directory(CrashLogs))
 	{
 		if (const auto Path = path::join(CrashLogs, SubDir); os::fs::create_directory(Path))
 		{
@@ -809,7 +832,7 @@ enum class handler_result
 	continue_search,
 };
 
-static handler_result ExcDialog(bool const CanContinue, string const& ReportLocation, string const& PluginInformation)
+static handler_result ExcDialog(DWORD const ExceptionCode, bool const CanContinue, string const& ReportLocation, string const& PluginInformation)
 {
 	// TODO: Far Dialog is not the best choice for exception reporting
 	// replace with something trivial
@@ -854,10 +877,7 @@ static handler_result ExcDialog(bool const CanContinue, string const& ReportLoca
 	const auto Result = Builder.ShowDialogEx();
 
 	if (Result == TerminateId)
-	{
-		UseTerminateHandler = true;
-		return handler_result::execute_handler;
-	}
+		os::process::terminate(ExceptionCode);
 
 	if (Result == UnloadId)
 		return handler_result::execute_handler;
@@ -911,7 +931,7 @@ static void print_exception_message(string const& ReportLocation, string const& 
 		Separator << Eol;
 }
 
-static handler_result ExcConsole(bool const CanContinue, string const& ReportLocation, string const& PluginInformation)
+static handler_result ExcConsole(DWORD const ExceptionCode, bool const CanContinue, string const& ReportLocation, string const& PluginInformation)
 {
 	string Message;
 	string Keys;
@@ -943,10 +963,7 @@ static handler_result ExcConsole(bool const CanContinue, string const& ReportLoc
 	intptr_t const Result = ConsoleChoice(Message, Keys, TerminateId, [&]{ print_exception_message(ReportLocation, PluginInformation); });
 
 	if (Result == TerminateId)
-	{
-		UseTerminateHandler = true;
-		return handler_result::execute_handler;
-	}
+		os::process::terminate(ExceptionCode);
 
 	if (Result == UnloadId)
 		return handler_result::execute_handler;
@@ -1298,27 +1315,12 @@ static string ExtractObjectType(EXCEPTION_RECORD const& xr)
 	if (Iterator != CatchableTypesEnumerator.cend())
 		return encoding::utf8::get_chars(*Iterator);
 
-#if IS_MICROSOFT_SDK()
-	return {};
-#else
-	const auto TypeInfo = abi::__cxa_current_exception_type();
-	if (!TypeInfo)
-		return {};
-
-	const auto Name = TypeInfo->name();
-	auto Status = -1;
-
-	struct free_deleter
-	{
-		void operator()(void* Ptr) const
-		{
-			free(Ptr);
-		}
-	};
-
-	std::unique_ptr<char, free_deleter> const DemangledName(abi::__cxa_demangle(Name, {}, {}, &Status));
-	return encoding::utf8::get_chars(DemangledName.get());
+#if !IS_MICROSOFT_SDK()
+	if (const auto TypeInfo = abi::__cxa_current_exception_type(); TypeInfo)
+		return os::debug::demangle(TypeInfo->name());
 #endif
+
+	return {};
 }
 
 static string_view exception_name(NTSTATUS const Code)
@@ -1428,7 +1430,7 @@ static string exception_details(string_view const Module, EXCEPTION_RECORD const
 				string SymbolName;
 				tracer.get_symbols(Module, {{{ ExceptionRecord.ExceptionInformation[1], 0 }}}, [&](string&& Line)
 				{
-					SymbolName = std::move(Line);
+					SymbolName = trim_left(std::move(Line));
 				});
 
 				if (SymbolName.empty())
@@ -1437,7 +1439,7 @@ static string exception_details(string_view const Module, EXCEPTION_RECORD const
 				return SymbolName;
 			}();
 
-			auto Result = far::format(L"Memory at {} could not be {}"sv, Symbol, Mode);
+			auto Result = far::format(L"Memory at [{}] could not be {}"sv, Symbol, Mode);
 			if (NtStatus == EXCEPTION_IN_PAGE_ERROR && ExceptionRecord.NumberParameters >= 3)
 				append(Result, L": "sv, os::format_ntstatus(static_cast<NTSTATUS>(ExceptionRecord.ExceptionInformation[2])));
 
@@ -1570,10 +1572,8 @@ static string collect_information(
 	string Address, Name, Source;
 	tracer.get_symbol(ModuleName, Context.exception_record().ExceptionAddress, Address, Name, Source);
 
-	Address.insert(0, L"0x"sv);
-
 	if (!Name.empty())
-		append(Address, L" - "sv, Name);
+		append(Address, L' ', Name);
 
 	if (!Source.empty())
 		append(Address, L" ("sv, Source, L')');
@@ -1791,7 +1791,7 @@ static handler_result handle_generic_exception(
 		return handler_result::continue_search;
 
 	if (s_ExceptionHandlingInprogress)
-		return handler_result::execute_handler;
+		os::process::terminate(Context.code());
 
 	s_ExceptionHandlingInprogress = true;
 	SCOPE_EXIT{ s_ExceptionHandlingInprogress = false; };
@@ -1804,7 +1804,7 @@ static handler_result handle_generic_exception(
 
 	SCOPED_ACTION(tracer_detail::tracer::with_symbols)(PluginModule? ModuleName : L""sv);
 
-	const auto ReportLocation = get_report_location();
+	const auto ReportLocation = s_ReportToStdErr? L"below"s : get_report_location();
 
 	LOGERROR(L"Unhandled exception, see {} for details"sv, ReportLocation);
 
@@ -1832,12 +1832,12 @@ static handler_result handle_generic_exception(
 		MiniDumpIgnoreInaccessibleMemory
 	);
 
-	const auto MinidumpNormal = write_minidump(Context, path::join(ReportLocation, WIDE_SV(MINIDUMP_NAME)), MinidumpFlags);
-	const auto MinidumpFull = write_minidump(Context, path::join(ReportLocation, WIDE_SV(FULLDUMP_NAME)), FulldumpFlags);
+	const auto MinidumpNormal = !s_ReportToStdErr && write_minidump(Context, path::join(ReportLocation, WIDE_SV(MINIDUMP_NAME)), MinidumpFlags);
+	const auto MinidumpFull = !s_ReportToStdErr && write_minidump(Context, path::join(ReportLocation, WIDE_SV(FULLDUMP_NAME)), FulldumpFlags);
 	const auto BugReport = collect_information(Context, Location, PluginInfo, ModuleName, Type, Message, ErrorState, NestedStack);
-	const auto ReportOnDisk = write_report(BugReport, path::join(ReportLocation, WIDE_SV(BUGREPORT_NAME)));
-	const auto ReportInClipboard = !ReportOnDisk && SetClipboardText(BugReport);
-	const auto ReadmeOnDisk = write_readme(path::join(ReportLocation, L"README.txt"sv));
+	const auto ReportOnDisk = !s_ReportToStdErr && write_report(BugReport, path::join(ReportLocation, WIDE_SV(BUGREPORT_NAME)));
+	const auto ReportInClipboard = !s_ReportToStdErr && !ReportOnDisk && SetClipboardText(BugReport);
+	const auto ReadmeOnDisk = !s_ReportToStdErr && write_readme(path::join(ReportLocation, L"README.txt"sv));
 	const auto AnythingOnDisk = ReportOnDisk || MinidumpNormal || MinidumpFull || ReadmeOnDisk;
 
 	if (AnythingOnDisk && os::is_interactive_user_session())
@@ -1848,6 +1848,7 @@ static handler_result handle_generic_exception(
 
 	const auto Result = AnythingOnDisk || ReportInClipboard?
 		(UseDialog? ExcDialog : ExcConsole)(
+			Context.code(),
 			CanContinue,
 			AnythingOnDisk?
 				ReportLocation :
@@ -1855,7 +1856,7 @@ static handler_result handle_generic_exception(
 			PluginInfo
 		) :
 		// Should never happen - neither the filesystem nor clipboard are writable, so just dump it to the screen:
-		ExcConsole(CanContinue, BugReport, PluginInfo);
+		ExcConsole(Context.code(), CanContinue, BugReport, PluginInfo);
 
 	switch (Result)
 	{
@@ -1863,8 +1864,6 @@ static handler_result handle_generic_exception(
 		break;
 
 	case handler_result::execute_handler:
-		if (!PluginModule && Global)
-			Global->CriticalInternalError = true;
 		break;
 
 	case handler_result::continue_search:
@@ -1987,9 +1986,16 @@ static bool handle_std_exception(
 	return handle_generic_exception(Context, Location, Module, Type, What, LastError) == handler_result::execute_handler;
 }
 
-bool handle_std_exception(const std::exception& e, const Plugin* const Module, source_location const& Location)
+void handle_std_exception(const std::exception& e, const Plugin* const Module, source_location const& Location)
 {
-	return handle_std_exception(exception_context(os::debug::exception_information()), e, Module, Location);
+	if (!handle_std_exception(exception_context(os::debug::exception_information()), e, Module, Location))
+		throw;
+}
+
+void handle_std_exception(const std::exception& e, source_location const& Location)
+{
+	handle_std_exception(e, {}, Location);
+	std::unreachable();
 }
 
 class seh_exception::seh_exception_impl
@@ -2070,14 +2076,16 @@ static handler_result handle_seh_exception(
 	return handle_generic_exception(Context, Location, PluginModule, {}, {}, LastError);
 }
 
-bool handle_unknown_exception(const Plugin* const Module, source_location const& Location)
+void handle_unknown_exception(const Plugin* const Module, source_location const& Location)
 {
-	return handle_seh_exception(exception_context(os::debug::exception_information()), Module, Location) == handler_result::execute_handler;
+	if (handle_seh_exception(exception_context(os::debug::exception_information()), Module, Location) != handler_result::execute_handler)
+		throw;
 }
 
-bool use_terminate_handler()
+void handle_unknown_exception(source_location const& Location)
 {
-	return UseTerminateHandler;
+	handle_unknown_exception({}, Location);
+	std::unreachable();
 }
 
 static void abort_handler_impl()
@@ -2103,8 +2111,11 @@ static void abort_handler_impl()
 	// If it's a SEH or a C++ exception implemented in terms of SEH (and not a fake for GCC) it's better to handle it as SEH
 	if (const auto Info = os::debug::exception_information(); Info.ContextRecord && Info.ExceptionRecord && !is_fake_cpp_exception(*Info.ExceptionRecord))
 	{
-		if (handle_seh_exception(exception_context(Info), {}, Location) == handler_result::execute_handler)
-			os::process::terminate_by_user();
+		if (handle_seh_exception(exception_context(Info), {}, Location) == handler_result::continue_search)
+		{
+			restore_system_exception_handler();
+			return;
+		}
 	}
 
 	// It's a C++ exception, implemented in some other way (GCC)
@@ -2116,13 +2127,11 @@ static void abort_handler_impl()
 		}
 		catch (std::exception const& e)
 		{
-			if (handle_std_exception(e, {}, Location))
-				os::process::terminate_by_user();
+			handle_std_exception(e, Location);
 		}
 		catch (...)
 		{
-			if (handle_unknown_exception({}, Location))
-				os::process::terminate_by_user();
+			handle_unknown_exception(Location);
 		}
 	}
 
@@ -2130,19 +2139,16 @@ static void abort_handler_impl()
 	exception_context const Context{ os::debug::fake_exception_information(STATUS_FAR_ABORT) };
 	error_state_ex const LastError{ os::last_error(), {}, errno };
 
-	if (handle_generic_exception(Context, Location, {}, {}, L"Abnormal termination"sv, LastError) == handler_result::execute_handler)
-		os::process::terminate_by_user();
-
-	restore_system_exception_handler();
+	if (handle_generic_exception(Context, Location, {}, {}, L"Abnormal termination"sv, LastError) == handler_result::continue_search)
+	{
+		restore_system_exception_handler();
+		return;
+	}
 }
 
 static LONG WINAPI unhandled_exception_filter_impl(EXCEPTION_POINTERS* const Pointers)
 {
-	const auto Result = detail::seh_filter(Pointers, {});
-	if (Result == EXCEPTION_EXECUTE_HANDLER)
-		os::process::terminate_by_user(Pointers->ExceptionRecord->ExceptionCode);
-
-	return Result;
+	return detail::seh_filter(Pointers, {});
 }
 
 unhandled_exception_filter::unhandled_exception_filter():
@@ -2245,7 +2251,7 @@ static void invalid_parameter_handler_impl(const wchar_t* const Expression, cons
 	))
 	{
 	case handler_result::execute_handler:
-		os::process::terminate_by_user();
+		break;
 
 	case handler_result::continue_execution:
 		return;
@@ -2273,8 +2279,7 @@ static LONG NTAPI vectored_exception_handler_impl(EXCEPTION_POINTERS* const Poin
 	if (static_cast<NTSTATUS>(Pointers->ExceptionRecord->ExceptionCode) == STATUS_HEAP_CORRUPTION)
 	{
 		// VEH handlers shouldn't do this in general, but it's not like we can make things much worse at this point anyways.
-		if (detail::seh_filter(Pointers, {}) == EXCEPTION_EXECUTE_HANDLER)
-			os::process::terminate_by_user(Pointers->ExceptionRecord->ExceptionCode);
+		return detail::seh_filter(Pointers, {});
 	}
 
 	return EXCEPTION_CONTINUE_SEARCH;

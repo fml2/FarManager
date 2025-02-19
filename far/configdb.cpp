@@ -45,7 +45,6 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "farversion.hpp"
 #include "lang.hpp"
 #include "message.hpp"
-#include "regex_helpers.hpp"
 #include "global.hpp"
 #include "stddlg.hpp"
 #include "log.hpp"
@@ -242,25 +241,29 @@ bool deserialise_value(std::string_view const Type, char const* Value, auto cons
 {
 	if (Type == "qword"sv)
 	{
-		Setter(strtoull(Value, nullptr, 16));
+		if (Value)
+			Setter(strtoull(Value, nullptr, 16));
 		return true;
 	}
 
 	if (Type == "text"sv)
 	{
-		Setter(encoding::utf8::get_chars(Value));
+		if (Value)
+			Setter(encoding::utf8::get_chars(Value));
 		return true;
 	}
 
 	if (Type == "base64"sv)
 	{
-		Setter(base64::decode(Value));
+		if (Value)
+			Setter(base64::decode(Value));
 		return true;
 	}
 
 	if (Type == "hex"sv)
 	{
-		Setter(HexStringToBlob(encoding::utf8::get_chars(Value)));
+		if (Value)
+			Setter(HexStringToBlob(encoding::utf8::get_chars(Value)));
 		return true;
 	}
 
