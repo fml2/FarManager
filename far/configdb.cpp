@@ -2401,8 +2401,8 @@ private:
 			if (e.QueryIntAttribute("leftpos", &leftpos) != tinyxml::XML_SUCCESS)
 				continue;
 
-			if (auto_statement(&stmtGetEditorPositionId)->Bind(encoding::utf8::get_chars(name)).Step())
-				ExecuteStatement(stmtSetEditorBookmark, stmtGetEditorPositionId.GetColInt64(0), num, line, linepos, screenline, leftpos);
+			if (auto_statement const Stmt(&stmtGetEditorPositionId); Stmt->Bind(encoding::utf8::get_chars(name)).Step())
+				ExecuteStatement(stmtSetEditorBookmark, Stmt->GetColInt64(0), num, line, linepos, screenline, leftpos);
 		}
 
 		for (const auto& e: xml_enum(historyRoot.FirstChildElement("viewerpositions"), "position"))
@@ -2440,8 +2440,8 @@ private:
 			if (e.QueryInt64Attribute("leftpos", &leftpos) != tinyxml::XML_SUCCESS)
 				continue;
 
-			if (auto_statement(&stmtGetViewerPositionId)->Bind(encoding::utf8::get_chars(name)).Step())
-				ExecuteStatement(stmtSetViewerBookmark, stmtGetViewerPositionId.GetColInt64(0), num, filepos, leftpos);
+			if (auto_statement const Stmt(&stmtGetViewerPositionId); Stmt->Bind(encoding::utf8::get_chars(name)).Step())
+				ExecuteStatement(stmtSetViewerBookmark, Stmt->GetColInt64(0), num, filepos, leftpos);
 		}
 	}
 
